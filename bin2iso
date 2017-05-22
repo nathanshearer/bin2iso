@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+
+#----------------------------------------------------------------------------
+# bin2iso
+# Copyright (C) 2014 Nathan Shearer
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published by
+# the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to:
+#   The Free Software Foundation Inc.
+#   51 Franklin Street
+#   Fifth Floor
+#   Boston, MA
+#   02110-1301
+#   USA
+
+NAME="bin2iso"
+CODENAME="bin2iso"
+COPYRIGHT="Copyright (C) 2014 Nathan Shearer"
+VERSION="1.0.0.0"
+
+# \brief Ensures dependencies are present
+# \param $@ The dependencies to check for
+function bin2iso_check_dependencies
+{
+	for TOOL in "$@"; do
+		if ! type "$TOOL" >/dev/null 2>/dev/null; then
+			echo "$CODENAME: \"$TOOL\" is required for this application to work correctly." >&2
+			exit
+		fi
+	done
+}
+
+# \brief Cleans up the environment and exits
+# \param $1 The exit code
+# \param $2 The exit message
+#
+# If DEBUG=true then temporary files are not deleted.
+function bin2iso_exit
+{
+	#echo "bin2iso_exit" "$@" >>"$LOG"
+	if $EXITING; then return; fi
+	EXITING=true
+	local EXIT="$1"
+	local MESSAGE="$2"
+	if [ "$EXIT" = "" ]; then
+		EXIT=0
+	fi
+	if [ "$MESSAGE" = "" ]; then
+		MESSAGE="An unrecoverable error has occurred"
+	fi
+	if ! $DEBUG; then
+		rm -rf "$TMP"
+	else
+		printf "Debug mode is enabled. Temporary files in \"$TMP\" will *not* be deleted.\n"
+	fi
+	case $EXIT in
+		0) exit;;
+		*) echo "$CODENAME: $MESSAGE" >&2; exit $EXIT;;
+	esac
+}
+
+# \brief Displays the help and exits the program
+function bin2iso_help
+{
+	printf "bin2iso converts a bin file to an iso.\n\n"
+	printf "Usage:\n"
+	printf "  $CODENAME [options]\n"
+	printf "Options:\n"
+	printf "  -h\n"
+	printf "    Display this help message and exit.\n"
+	printf "  -i file.bin\n"
+	printf "    Input bin file.\n"
+	printf "  -n N\n"
+	printf "    Sets the niceness to N (default 0).\n"
+	printf "  -o file.iso\n"
+	printf "    Output file.iso.\n"
+	printf "  -t mode1raw|mode1rawsub|mode2form1raw|mode2form2raw\n"
+	printf "Examples:\n"
+	printf "  $CODENAME -i windows.bin -t mode1rawsub -o windows.iso\n"
+	printf "  $CODENAME -i playstation.bin -t mode2form1rawsub -o playstation.iso\n"
+	exit
+}
+
+#------------------------------------------------------------------------------
+# default configuration
+
+DEBUG=false
+NICE=0
+TMP="/tmp"
+
+#------------------------------------------------------------------------------
+# config files
+
+if [ -r /etc/$CODENAME.conf ]; then
+	. /etc/$CODENAME.conf
+fi
+if [ -r ~/.$CODENAME.conf ]; then
+	. ~/.$CODENAME.conf
+fi
+
+#------------------------------------------------------------------------------
+# command line arguments
+
+if [ $# -eq 0 ]; then
+	bin2iso_help
+fi
+while getopts "hi:n:o:t:v" OPTION; do
+	case "$OPTION" in
+		"h") bin2iso_help;;
+		"i") INPUT="$OPTARG";;
+		"n") NICE="$OPTARG";;
+		"o") OUTPUT="$OPTARG";;
+		"t") TYPE="$OPTARG";;
+		*) bin2iso_help;;
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+#------------------------------------------------------------------------------
+# prepare environment
+
+EXITING=false
+trap bin2iso_exit EXIT SIGHUP SIGINT SIGQUIT SIGABRT SIGKILL SIGTERM
+TMP="$TMP/$CODENAME.$$"
+mkdir -p "$TMP"
+LOG="$TMP/log"
+touch "$LOG"
+renice $NICE $$ >>"$LOG" 2>>"$LOG"
+
+#------------------------------------------------------------------------------
+# begin execution
+
+bin2iso_check_dependencies dd
+
+INPUT_SIZE=`stat --format=%s "$INPUT"`
+case "$TYPE" in
+	"mode1raw")
+		echo "Converting \"$INPUT\" to \"$OUTPUT\""
+		echo "Sector Format (CD-ROM Mode 1 Raw)"
+		echo "  12 Bytes (Sync Pattern)"
+		echo "  3 Bytes (Address)"
+		echo "  1 Bytes (Mode, 0x01)"
+		echo "  2048 Bytes (Data)"
+		echo "  4 Bytes (Error Detection)"
+		echo "  8 Bytes (Reserved, 0x0000000000000000)"
+		echo "  276 Bytes (Error Correction)"
+		SECTOR_BEGIN=0
+		SECTOR_END=$(( $INPUT_SIZE / 2352 ))
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
+			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2352 + 12 + 3 + 1 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2048 )) count=2048 status=none
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+		printf "\n"
+		;;
+	"mode1rawsub")
+		echo "Converting \"$INPUT\" to \"$OUTPUT\""
+		echo "Sector Format (CD-ROM Mode 1 Raw with Subchannels)"
+		echo "  12 Bytes (Sync Pattern)"
+		echo "  3 Bytes (Address)"
+		echo "  1 Bytes (Mode, 0x01)"
+		echo "  2048 Bytes (Data)"
+		echo "  4 Bytes (Error Detection)"
+		echo "  8 Bytes (Reserved, 0x0000000000000000)"
+		echo "  276 Bytes (Error Correction)"
+		echo "  96 Bytes (Subcannels)"
+		SECTOR_BEGIN=0
+		SECTOR_END=$(( $INPUT_SIZE / 2448 ))
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
+			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2448 + 12 + 3 + 1 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2048 )) count=2048 status=none
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+		printf "\n"
+		;;
+	"mode2form1raw")
+		echo "Converting \"$INPUT\" to \"$OUTPUT\""
+		echo "Sector Format (CD-ROM XA Mode 2 Form 1)"
+		echo "  12 Bytes (Sync Pattern)"
+		echo "  3 Bytes (Address)"
+		echo "  1 Bytes (Mode, 0x01)"
+		echo "  8 Bytes (Subeader)"
+		echo "  2048 Bytes (Data)"
+		echo "  4 Bytes (Error Detection)"
+		echo "  276 Bytes (Error Correction)"
+		SECTOR_BEGIN=0
+		SECTOR_END=$(( $INPUT_SIZE / 2352 ))
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
+			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2048 )) count=2048 status=none
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+		printf "\n"
+		;;
+	"mode2form2raw")
+		echo "Converting \"$INPUT\" to \"$OUTPUT\""
+		echo "Sector Format (CD-ROM XA Mode 2 Form 2)"
+		echo "  12 Bytes (Sync Pattern)"
+		echo "  3 Bytes (Address)"
+		echo "  1 Bytes (Mode, 0x01)"
+		echo "  8 Bytes (Subeader)"
+		echo "  2324 Bytes (Data)"
+		echo "  4 Bytes (Error Detection)"
+		SECTOR_BEGIN=0
+		SECTOR_END=$(( $INPUT_SIZE / 2352 ))
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
+			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2324 )) count=2324 status=none
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+		printf "\n"
+		;;
+	*) echo "Unknown bin file type: $TYPE";;
+esac
