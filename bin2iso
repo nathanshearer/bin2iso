@@ -1,31 +1,10 @@
 #!/usr/bin/env bash
 
-#----------------------------------------------------------------------------
-# bin2iso
-# Copyright (C) 2014 Nathan Shearer
-#
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License version 2 as published by
-# the Free Software Foundation.
-#
-# This program is distributed in the hope that it will be useful, but WITHOUT
-# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-# more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to:
-#   The Free Software Foundation Inc.
-#   51 Franklin Street
-#   Fifth Floor
-#   Boston, MA
-#   02110-1301
-#   USA
-
 NAME="bin2iso"
 CODENAME="bin2iso"
 COPYRIGHT="Copyright (C) 2014 Nathan Shearer"
-VERSION="1.0.0.0"
+LICENSE="GNU General Public License 2.0"
+VERSION="2.0.0.0"
 
 # \brief Ensures dependencies are present
 # \param $@ The dependencies to check for
@@ -37,6 +16,126 @@ function bin2iso_check_dependencies
 			exit
 		fi
 	done
+}
+
+# \brief Automatically detects the type of a bin file
+# \param "$1" The bin file
+function bin2iso_detect_type
+{
+	local INPUT="$1"
+	local INPUT_SIZE=$(stat --format=%s "$INPUT")
+	
+	# automatic detection of CD-ROM discs is perform by looking for the "volume descriptor"
+	# the first 32768 bytes of the data fields is the "system area" which is unused by ISO 9660
+	# the next 2048 bytes of the data fields is the first "volume descriptor"
+	# the "volume descriptor" has the following fields:
+	#   1 byte type
+	#   5 bytes identifier (always CD001)
+	#   1 byte version (always 0x01)
+	#   2041 bytes data
+	
+	# CD-ROM Mode 1 Raw
+	local SECTOR_BEGIN=16
+	local VD_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1)) count=1 | xxd -p)
+	local VD_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 1)) count=5 | xxd -p)
+	local VD_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 6)) count=1 | xxd -p)
+	if [ "$VD_TYPE" = "01" -a "$VD_IDENTIFIER" = "4344303031" -a "$VD_VERSION" = "01" ]; then
+		SECTOR_BEGIN=17
+		local SECTOR_END=$(($INPUT_SIZE / 2352))
+		if [ $SECTOR_END -gt 512 ]; then SECTOR_END=512; fi # only inspect the first 1MiB or 512 sectors for the "volume descriptor terminator" to improve performance
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			local VDT_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1)) count=1 | xxd -p)
+			local VDT_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 1)) count=5 | xxd -p)
+			local VDT_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 6)) count=1 | xxd -p)
+			if [ "$VDT_TYPE" = "ff" -a "$VDT_IDENTIFIER" = "4344303031" -a "$VDT_VERSION" = "01" ]; then
+				echo "Detected CD-ROM Mode 1 Raw"
+				TYPE="mode1raw"
+				break
+			fi
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+	fi
+	
+	# CD-ROM Mode 1 Raw with Subchannels
+	local SECTOR_BEGIN=16
+	local VD_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2448 + 12 + 3 + 1)) count=1 | xxd -p)
+	local VD_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2448 + 12 + 3 + 1 + 1)) count=5 | xxd -p)
+	local VD_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2448 + 12 + 3 + 1 + 6)) count=1 | xxd -p)
+	if [ "$VD_TYPE" = "01" -a "$VD_IDENTIFIER" = "4344303031" -a "$VD_VERSION" = "01" ]; then
+		SECTOR_BEGIN=17
+		local SECTOR_END=$(($INPUT_SIZE / 2448))
+		if [ $SECTOR_END -gt 512 ]; then SECTOR_END=512; fi # only inspect the first 1MiB or 512 sectors for the "volume descriptor terminator" to improve performance
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			local VDT_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2448 + 12 + 3 + 1)) count=1 | xxd -p)
+			local VDT_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2448 + 12 + 3 + 1 + 1)) count=5 | xxd -p)
+			local VDT_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2448 + 12 + 3 + 1 + 6)) count=1 | xxd -p)
+			if [ "$VDT_TYPE" = "ff" -a "$VDT_IDENTIFIER" = "4344303031" -a "$VDT_VERSION" = "01" ]; then
+				echo "Detected CD-ROM Mode 1 Raw with Subchannels"
+					if [ "$TYPE" != "auto" ]; then
+						echo "Error: Multiple matching image types. Consider specifying the type instead of relying on automatic detection."
+					fi
+				TYPE="mode1rawsub"
+				break
+			fi
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+	fi
+	
+	# CD-ROM XA Mode 2 Form 1
+	local SECTOR_BEGIN=16
+	local VD_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8)) count=1 | xxd -p)
+	local VD_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 1)) count=5 | xxd -p)
+	local VD_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 6)) count=1 | xxd -p)
+	if [ "$VD_TYPE" = "01" -a "$VD_IDENTIFIER" = "4344303031" -a "$VD_VERSION" = "01" ]; then
+		SECTOR_BEGIN=17
+		local SECTOR_END=$(($INPUT_SIZE / 2352))
+		if [ $SECTOR_END -gt 512 ]; then SECTOR_END=512; fi # only inspect the first 1MiB or 512 sectors for the "volume descriptor terminator" to improve performance
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			local VDT_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8)) count=1 | xxd -p)
+			local VDT_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 1)) count=5 | xxd -p)
+			local VDT_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 6)) count=1 | xxd -p)
+			if [ "$VDT_TYPE" = "ff" -a "$VDT_IDENTIFIER" = "4344303031" -a "$VDT_VERSION" = "01" ]; then
+				echo "Detected CD-ROM XA Mode 2 Form 1"
+					if [ "$TYPE" != "auto" ]; then
+						echo "Error: Multiple matching image types. Consider specifying the type instead of relying on automatic detection."
+					fi
+				TYPE="mode2form1raw"
+				break
+			fi
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+	fi
+	
+	# todo Need a sample file to test this. It is a copy of CD-ROM XA Mode 2 Form 2. Not sure of the alignment of the volume descriptor terminator
+	# CD-ROM XA Mode 2 Form 2
+	local SECTOR_BEGIN=16
+	local VD_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8)) count=1 | xxd -p)
+	local VD_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 1)) count=5 | xxd -p)
+	local VD_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 6)) count=1 | xxd -p)
+	if [ "$VD_TYPE" = "01" -a "$VD_IDENTIFIER" = "4344303031" -a "$VD_VERSION" = "01" ]; then
+		SECTOR_BEGIN=17
+		local SECTOR_END=$(($INPUT_SIZE / 2352))
+		if [ $SECTOR_END -gt 512 ]; then SECTOR_END=512; fi # only inspect the first 1MiB or 512 sectors for the "volume descriptor terminator" to improve performance
+		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
+			local VDT_TYPE=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8)) count=1 | xxd -p)
+			local VDT_IDENTIFIER=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 1)) count=5 | xxd -p)
+			local VDT_VERSION=$(dd status=none if="$INPUT" bs=1 skip=$(($SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 + 6)) count=1 | xxd -p)
+			if [ "$VDT_TYPE" = "ff" -a "$VDT_IDENTIFIER" = "4344303031" -a "$VDT_VERSION" = "01" ]; then
+				echo "Detected CD-ROM XA Mode 2 Form 2"
+					if [ "$TYPE" != "auto" ]; then
+						echo "Error: Multiple matching image types. Consider specifying the type instead of relying on automatic detection."
+					fi
+				TYPE="mode2form2raw"
+				break
+			fi
+			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+		done
+	fi
+
+	if [ "$TYPE" = "auto" ]; then
+		echo "Error: Unable to automatically detect type."
+		exit 1
+	fi
 }
 
 # \brief Cleans up the environment and exits
@@ -71,22 +170,70 @@ function bin2iso_exit
 # \brief Displays the help and exits the program
 function bin2iso_help
 {
-	printf "bin2iso converts a bin file to an iso.\n\n"
-	printf "Usage:\n"
-	printf "  $CODENAME [options]\n"
-	printf "Options:\n"
-	printf "  -h\n"
-	printf "    Display this help message and exit.\n"
-	printf "  -i file.bin\n"
-	printf "    Input bin file.\n"
-	printf "  -n N\n"
-	printf "    Sets the niceness to N (default 0).\n"
-	printf "  -o file.iso\n"
-	printf "    Output file.iso.\n"
-	printf "  -t mode1raw|mode1rawsub|mode2form1raw|mode2form2raw\n"
-	printf "Examples:\n"
-	printf "  $CODENAME -i windows.bin -t mode1rawsub -o windows.iso\n"
-	printf "  $CODENAME -i playstation.bin -t mode2form1rawsub -o playstation.iso\n"
+	#     01234567890123456789012345678901234567890123456789012345678901234567890123456789
+	echo "Description:"
+	echo "  bin2iso converts a cdrdao bin file to an iso image file"
+	echo
+	echo "Usage:"
+	echo "  $CODENAME [options]"
+	echo
+	echo "Options:"
+	echo "  -c, --config $CODENAME.conf"
+	echo "    Load $CODENAME.conf after trying /etc/$CODENAME.conf and ~/.$CODENAME.conf"
+	echo "  -h, --help"
+	echo "    Display this help message and exit."
+	echo "  -i, --input file.bin"
+	echo "    Input bin file."
+	echo "  -o, --output file.iso"
+	echo "    Output file.iso."
+	echo "  -t, --type auto"
+	echo "    auto"
+	echo "      Automatically detect the image type"
+	echo "    mode1raw"
+	echo "      2352 Byte CD-ROM Mode 1 Raw Sector Format:"
+	echo "      12 Bytes (Sync Pattern)"
+	echo "      3 Bytes (Address)"
+	echo "      1 Bytes (Mode, 0x01)"
+	echo "      2048 Bytes (Data)"
+	echo "      4 Bytes (Error Detection)"
+	echo "      8 Bytes (Reserved, 0x0000000000000000)"
+	echo "      276 Bytes (Error Correction)"
+	echo "    mode1rawsub"
+	echo "      CD-ROM Mode 1 Raw with Subchannels Sector Format:"
+	echo "      12 Bytes (Sync Pattern)"
+	echo "      3 Bytes (Address)"
+	echo "      1 Bytes (Mode, 0x01)"
+	echo "      2048 Bytes (Data)"
+	echo "      4 Bytes (Error Detection)"
+	echo "      8 Bytes (Reserved, 0x0000000000000000)"
+	echo "      276 Bytes (Error Correction)"
+	echo "      96 Bytes (Subcannels)"
+	echo "    mode2form1raw"
+	echo "      2448 Byte 2352 Byte CD-ROM XA Mode 2 Form 1 Sector Format:"
+	echo "      12 Bytes (Sync Pattern)"
+	echo "      3 Bytes (Address)"
+	echo "      1 Bytes (Mode, 0x01)"
+	echo "      8 Bytes (Subeader)"
+	echo "      2048 Bytes (Data)"
+	echo "      4 Bytes (Error Detection)"
+	echo "      276 Bytes (Error Correction)"
+	echo "    mode2form2raw"
+	echo "      2352 Byte CD-ROM XA Mode 2 Form 2 Sector Format:"
+	echo "      12 Bytes (Sync Pattern)"
+	echo "      3 Bytes (Address)"
+	echo "      1 Bytes (Mode, 0x01)"
+	echo "      8 Bytes (Subeader)"
+	echo "      2324 Bytes (Data)"
+	echo "      4 Bytes (Error Detection)"
+	echo
+	echo "Examples:"
+	echo "  $CODENAME -i windows.bin -t mode1rawsub -o windows.iso"
+	echo "  $CODENAME -i playstation.bin -t auto -o playstation.iso"
+	echo
+	echo "Version:"
+	echo "  $NAME $VERSION"
+	echo "  $COPYRIGHT"
+	echo "  Licensed under $LICENSE"
 	exit
 }
 
@@ -96,6 +243,7 @@ function bin2iso_help
 DEBUG=false
 NICE=0
 TMP="/tmp"
+TYPE="auto"
 
 #------------------------------------------------------------------------------
 # config files
@@ -113,17 +261,43 @@ fi
 if [ $# -eq 0 ]; then
 	bin2iso_help
 fi
-while getopts "hi:n:o:t:v" OPTION; do
-	case "$OPTION" in
-		"h") bin2iso_help;;
-		"i") INPUT="$OPTARG";;
-		"n") NICE="$OPTARG";;
-		"o") OUTPUT="$OPTARG";;
-		"t") TYPE="$OPTARG";;
-		*) bin2iso_help;;
+while [ $# -ne 0 ]; do
+	case "$1" in
+		"-c"|"--config")
+			. "$2"
+			shift 2
+			;;
+		"--examine")
+			bin2iso_detect_type "$2"
+			shift 2
+			exit
+			;;
+		"-h"|"--help")
+			bin2iso_help
+			exit
+			;;
+		"-i"|"--input")
+			INPUT="$2"
+			shift 2
+			;;
+		"-o"|"--output")
+			OUTPUT="$2"
+			shift 2
+			;;
+		"-t"|"--type")
+			TYPE="$2"
+			shift 2
+			;;
+		"-v"|"--verbose")
+			VERBOSE="$2"
+			shift 2
+			;;
+		*)
+			bin2iso_help
+			exit
+			;;
 	esac
 done
-shift $(( $OPTIND - 1 ))
 
 #------------------------------------------------------------------------------
 # prepare environment
@@ -139,83 +313,53 @@ renice $NICE $$ >>"$LOG" 2>>"$LOG"
 #------------------------------------------------------------------------------
 # begin execution
 
-bin2iso_check_dependencies dd
+bin2iso_check_dependencies dd xxd
+
+bin2iso_detect_type "$INPUT"
 
 INPUT_SIZE=`stat --format=%s "$INPUT"`
 case "$TYPE" in
 	"mode1raw")
 		echo "Converting \"$INPUT\" to \"$OUTPUT\""
-		echo "Sector Format (CD-ROM Mode 1 Raw)"
-		echo "  12 Bytes (Sync Pattern)"
-		echo "  3 Bytes (Address)"
-		echo "  1 Bytes (Mode, 0x01)"
-		echo "  2048 Bytes (Data)"
-		echo "  4 Bytes (Error Detection)"
-		echo "  8 Bytes (Reserved, 0x0000000000000000)"
-		echo "  276 Bytes (Error Correction)"
 		SECTOR_BEGIN=0
 		SECTOR_END=$(( $INPUT_SIZE / 2352 ))
 		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
-			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2352 + 12 + 3 + 1 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2048 )) count=2048 status=none
 			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 		done
 		printf "\n"
 		;;
 	"mode1rawsub")
 		echo "Converting \"$INPUT\" to \"$OUTPUT\""
-		echo "Sector Format (CD-ROM Mode 1 Raw with Subchannels)"
-		echo "  12 Bytes (Sync Pattern)"
-		echo "  3 Bytes (Address)"
-		echo "  1 Bytes (Mode, 0x01)"
-		echo "  2048 Bytes (Data)"
-		echo "  4 Bytes (Error Detection)"
-		echo "  8 Bytes (Reserved, 0x0000000000000000)"
-		echo "  276 Bytes (Error Correction)"
-		echo "  96 Bytes (Subcannels)"
 		SECTOR_BEGIN=0
 		SECTOR_END=$(( $INPUT_SIZE / 2448 ))
 		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
-			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2448 + 12 + 3 + 1 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2048 )) count=2048 status=none
 			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 		done
 		printf "\n"
 		;;
 	"mode2form1raw")
 		echo "Converting \"$INPUT\" to \"$OUTPUT\""
-		echo "Sector Format (CD-ROM XA Mode 2 Form 1)"
-		echo "  12 Bytes (Sync Pattern)"
-		echo "  3 Bytes (Address)"
-		echo "  1 Bytes (Mode, 0x01)"
-		echo "  8 Bytes (Subeader)"
-		echo "  2048 Bytes (Data)"
-		echo "  4 Bytes (Error Detection)"
-		echo "  276 Bytes (Error Correction)"
 		SECTOR_BEGIN=0
 		SECTOR_END=$(( $INPUT_SIZE / 2352 ))
 		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
-			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2048 )) count=2048 status=none
 			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 		done
 		printf "\n"
 		;;
 	"mode2form2raw")
 		echo "Converting \"$INPUT\" to \"$OUTPUT\""
-		echo "Sector Format (CD-ROM XA Mode 2 Form 2)"
-		echo "  12 Bytes (Sync Pattern)"
-		echo "  3 Bytes (Address)"
-		echo "  1 Bytes (Mode, 0x01)"
-		echo "  8 Bytes (Subeader)"
-		echo "  2324 Bytes (Data)"
-		echo "  4 Bytes (Error Detection)"
 		SECTOR_BEGIN=0
 		SECTOR_END=$(( $INPUT_SIZE / 2352 ))
 		while [ $SECTOR_BEGIN -lt $SECTOR_END ]; do
-			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 			dd bs=1 if="$INPUT" skip=$(( $SECTOR_BEGIN * 2352 + 12 + 3 + 1 + 8 )) of="$OUTPUT" seek=$(( $SECTOR_BEGIN * 2324 )) count=2324 status=none
 			SECTOR_BEGIN=$(( $SECTOR_BEGIN + 1 ))
+			printf "\rConverted: $SECTOR_BEGIN/$SECTOR_END"
 		done
 		printf "\n"
 		;;
